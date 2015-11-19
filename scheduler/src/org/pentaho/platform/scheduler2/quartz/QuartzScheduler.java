@@ -257,11 +257,17 @@ public class QuartzScheduler implements IScheduler {
 
     String curUser = getCurrentUser();
 
+    // determine if the job params tell us who owns the job
+    Serializable jobOwner = jobParams.get( RESERVEDMAPKEY_ACTIONUSER );
+    if ( jobOwner != null && jobOwner.toString().length() > 0 ) {
+      curUser = jobOwner.toString();
+    }
+
     QuartzJobKey jobId = new QuartzJobKey( jobName, curUser );
 
     Trigger quartzTrigger = createQuartzTrigger( trigger, jobId );
     
-    if(trigger.getEndTime() !=null ){
+    if( trigger.getEndTime() != null ){
       quartzTrigger.setEndTime( trigger.getEndTime() );
     }
 
@@ -387,6 +393,9 @@ public class QuartzScheduler implements IScheduler {
       Scheduler scheduler = getQuartzScheduler();
       String groupName = jobKey.getUserName();
       for ( Trigger trigger : scheduler.getTriggersOfJob( jobId, groupName ) ) {
+        if ( "MANUAL_TRIGGER".equals( trigger.getGroup() ) ) {
+          continue;
+        }
         if ( trigger instanceof SimpleTrigger ) {
           ( (SimpleTrigger) trigger ).setPreviousFireTime( new Date() );
         } else if ( trigger instanceof CronTrigger ) {
@@ -442,6 +451,9 @@ public class QuartzScheduler implements IScheduler {
       for ( String groupName : scheduler.getJobGroupNames() ) {
         for ( String jobId : scheduler.getJobNames( groupName ) ) {
           for ( Trigger trigger : scheduler.getTriggersOfJob( jobId, groupName ) ) {
+            if ( "MANUAL_TRIGGER".equals( trigger.getGroup() ) ) {
+              continue;
+            }
             Job job = new Job();
             job.setGroupName( groupName );
             JobDetail jobDetail = scheduler.getJobDetail( jobId, groupName );
@@ -750,11 +762,11 @@ public class QuartzScheduler implements IScheduler {
             if ( sequencePattern.matcher( token ).matches() ) {
               String[] days = token.split( "-" ); //$NON-NLS-1$
               timeRecurrence.add( new SequentialRecurrence( Integer.parseInt( days[0] ),
-                      Integer.parseInt( days[1] ) ) );
+                      Integer.parseInt( days[ 1 ] ) ) );
             } else if ( intervalPattern.matcher( token ).matches() ) {
               String[] days = token.split( "/" ); //$NON-NLS-1$
               timeRecurrence
-                  .add( new IncrementalRecurrence( Integer.parseInt( days[0] ), Integer.parseInt( days[1] ) ) );
+                  .add( new IncrementalRecurrence( Integer.parseInt( days[ 0 ] ), Integer.parseInt( days[ 1 ] ) ) );
             } else if ( "L".equalsIgnoreCase( token ) ) {
               timeRecurrence.add( new QualifiedDayOfMonth() );
             } else {

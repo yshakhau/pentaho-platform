@@ -12,7 +12,7 @@
  * without even the implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
  * See the GNU Lesser General Public License for more details.
  *
- * Copyright (c) 2002-2013 Pentaho Corporation..  All rights reserved.
+ * Copyright (c) 2002-2015 Pentaho Corporation..  All rights reserved.
  */
 
 package org.pentaho.platform.plugin.services.importer;
@@ -33,10 +33,14 @@ import org.pentaho.platform.api.mt.ITenant;
 import org.pentaho.platform.api.repository.datasource.IDatasourceMgmtService;
 import org.pentaho.platform.api.repository2.unified.IPlatformImportBundle;
 import org.pentaho.platform.api.repository2.unified.RepositoryFile;
+import org.pentaho.platform.api.usersettings.IAnyUserSettingService;
+import org.pentaho.platform.api.usersettings.IUserSettingService;
+import org.pentaho.platform.api.usersettings.pojo.IUserSetting;
 import org.pentaho.platform.core.mt.Tenant;
 import org.pentaho.platform.engine.core.system.PentahoSystem;
 import org.pentaho.platform.engine.core.system.TenantUtils;
 import org.pentaho.platform.plugin.services.importexport.ExportFileNameEncoder;
+import org.pentaho.platform.plugin.services.importexport.ExportManifestUserSetting;
 import org.pentaho.platform.plugin.services.importexport.ImportSession;
 import org.pentaho.platform.plugin.services.importexport.ImportSource.IRepositoryFileBundle;
 import org.pentaho.platform.plugin.services.importexport.RepositoryFileBundle;
@@ -62,8 +66,10 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipInputStream;
 
@@ -75,6 +81,7 @@ public class SolutionImportHandler implements IPlatformImportHandler {
   protected Map<String, RepositoryFileImportBundle.Builder> cachedImports;
   private SolutionFileImportHelper solutionHelper;
   private List<IMimeType> mimeTypes;
+  private boolean overwriteFile;
 
   public SolutionImportHandler( List<IMimeType> mimeTypes ) {
     this.mimeTypes = mimeTypes;
@@ -92,7 +99,7 @@ public class SolutionImportHandler implements IPlatformImportHandler {
     ZipInputStream zipImportStream = new ZipInputStream( bundle.getInputStream() );
     SolutionRepositoryImportSource importSource = new SolutionRepositoryImportSource( zipImportStream );
     LocaleFilesProcessor localeFilesProcessor = new LocaleFilesProcessor();
-
+    setOverwriteFile( bundle.overwriteInRepository() );
     // importSession.set(ImportSession.getSession());
 
     IPlatformImporter importer = PentahoSystem.get( IPlatformImporter.class );
@@ -117,7 +124,7 @@ public class SolutionImportHandler implements IPlatformImportHandler {
       for ( ExportManifestMetadata exportManifestMetadata : metadataList ) {
 
         String domainId = exportManifestMetadata.getDomainId();
-        boolean overWriteInRepository = true;
+        boolean overWriteInRepository = isOverwriteFile();
         RepositoryFileImportBundle.Builder bundleBuilder =
             new RepositoryFileImportBundle.Builder().charSet( "UTF-8" )
               .hidden( false )
@@ -144,7 +151,7 @@ public class SolutionImportHandler implements IPlatformImportHandler {
 
         RepositoryFileImportBundle.Builder bundleBuilder =
             new RepositoryFileImportBundle.Builder().charSet( "UTF_8" ).hidden( false ).name( catName ).overwriteFile(
-              true ).mime( "application/vnd.pentaho.mondrian+xml" )
+              isOverwriteFile() ).mime( "application/vnd.pentaho.mondrian+xml" )
                 .withParam( "parameters", parametersStr.toString() ).withParam( "domain-id", catName ); // TODO: this is
         // definitely
         // named wrong
@@ -162,10 +169,9 @@ public class SolutionImportHandler implements IPlatformImportHandler {
             .path( MondrianCatalogRepositoryHelper.ETC_MONDRIAN_JCR_FOLDER + RepositoryFile.SEPARATOR + catName )
             .name( "annotations.xml" )
             .charSet( "UTF_8" )
-            .overwriteFile( true )
+            .overwriteFile( isOverwriteFile() )
             .mime( "text/xml" )
             .hidden( false )
-            .overwriteFile( true )
             .withParam( "domain-id", catName );
           cachedImports.put( annotationsFile, annotationsBundle );
 
@@ -264,36 +270,27 @@ public class SolutionImportHandler implements IPlatformImportHandler {
       }
     }
     if ( manifest != null ) {
-      List<JobScheduleRequest> scheduleList = manifest.getScheduleList();
-      if ( scheduleList != null ) {
-        SchedulerResource schedulerResource = new SchedulerResource();
-        for ( JobScheduleRequest jobScheduleRequest : scheduleList ) {
-          try {
-            Response response = createSchedulerJob( schedulerResource, jobScheduleRequest );
-            if ( response.getStatus() == Response.Status.OK.getStatusCode() ) {
-              if ( response.getEntity() != null ) {
-                // get the schedule job id from the response and add it to the import session
-                ImportSession.getSession().addImportedScheduleJobId( response.getEntity().toString() );
-              }
-            }
-          } catch ( Exception e ) {
-            throw new PlatformImportException( Messages.getInstance()
-                .getString( "SolutionImportHandler.ERROR_0001_ERROR_CREATING_SCHEDULE", e.getMessage() ) );
-          }
-        }
-      }
+      importSchedules( manifest.getScheduleList() );
 
       // Add Pentaho Connections
       List<org.pentaho.database.model.DatabaseConnection> datasourceList = manifest.getDatasourceList();
       if ( datasourceList != null ) {
         IDatasourceMgmtService datasourceMgmtSvc = PentahoSystem.get( IDatasourceMgmtService.class );
         for ( org.pentaho.database.model.DatabaseConnection databaseConnection : datasourceList ) {
+          if ( databaseConnection.getDatabaseType() == null ) {
+            // don't try to import the connection if there is no type it will cause an error
+            // However, if this is the DI Server, and the connection is defined in a ktr, it will import automatically
+            log.warn( "Can't import connection " + databaseConnection.getName() + " because it doesn't have a databaseType" );
+            continue;
+          }
           try {
             IDatabaseConnection existingDBConnection =
                 datasourceMgmtSvc.getDatasourceByName( databaseConnection.getName() );
             if ( existingDBConnection != null && existingDBConnection.getName() != null ) {
-              databaseConnection.setId( existingDBConnection.getId() );
-              datasourceMgmtSvc.updateDatasourceByName( databaseConnection.getName(), databaseConnection );
+              if ( isOverwriteFile() ) {
+                databaseConnection.setId( existingDBConnection.getId() );
+                datasourceMgmtSvc.updateDatasourceByName( databaseConnection.getName(), databaseConnection );
+              }
             } else {
               datasourceMgmtSvc.createDatasource( databaseConnection );
             }
@@ -307,23 +304,74 @@ public class SolutionImportHandler implements IPlatformImportHandler {
     localeFilesProcessor.processLocaleFiles( importer );
   }
 
+  protected void importSchedules( List<JobScheduleRequest> scheduleList ) throws PlatformImportException {
+    if ( scheduleList != null ) {
+      SchedulerResource schedulerResource = new SchedulerResource();
+      for ( JobScheduleRequest jobScheduleRequest : scheduleList ) {
+        try {
+          Response response = createSchedulerJob( schedulerResource, jobScheduleRequest );
+          if ( response.getStatus() == Response.Status.OK.getStatusCode() ) {
+            if ( response.getEntity() != null ) {
+              // get the schedule job id from the response and add it to the import session
+              ImportSession.getSession().addImportedScheduleJobId( response.getEntity().toString() );
+            }
+          }
+        } catch ( Exception e ) {
+          // there is a scenario where if the file scheduled has a space in the file name, that it won't work. the di server
+          // replaces spaces with underscores and the export mechanism can't determine if it needs this to happen or not
+          // so, if we failed to import and there is a space in the path, try again but this time with replacing the space(s)
+          if ( jobScheduleRequest.getInputFile().contains( " " ) || jobScheduleRequest.getOutputFile().contains( " " ) ) {
+            log.info( "Could not import schedule, attempting to replace spaces with underscores and retrying: "
+              + jobScheduleRequest.getInputFile() );
+            File inFile = new File( jobScheduleRequest.getInputFile() );
+            File outFile = new File( jobScheduleRequest.getOutputFile() );
+            String inputFileName = inFile.getParent() + RepositoryFile.SEPARATOR
+              + inFile.getName().replaceAll( " ", "_" );
+            String outputFileName = outFile.getParent() + RepositoryFile.SEPARATOR
+              + outFile.getName().replaceAll( " ", "_" );
+            jobScheduleRequest.setInputFile( inputFileName );
+            jobScheduleRequest.setOutputFile( outputFileName );
+            try {
+              Response response = createSchedulerJob( schedulerResource, jobScheduleRequest );
+              if ( response.getStatus() == Response.Status.OK.getStatusCode() ) {
+                if ( response.getEntity() != null ) {
+                  // get the schedule job id from the response and add it to the import session
+                  ImportSession.getSession().addImportedScheduleJobId( response.getEntity().toString() );
+                }
+              }
+            } catch ( Exception ex ) {
+              // log it and keep going. we should stop processing all schedules just because one fails.
+              log.error( Messages.getInstance()
+                .getString( "SolutionImportHandler.ERROR_0001_ERROR_CREATING_SCHEDULE", e.getMessage() ) );
+            }
+          } else {
+            // log it and keep going. we should stop processing all schedules just because one fails.
+            log.error( Messages.getInstance()
+              .getString( "SolutionImportHandler.ERROR_0001_ERROR_CREATING_SCHEDULE", e.getMessage() ) );
+          }
+        }
+      }
+    }
+  }
+
   protected void importMetaStore( ExportManifest manifest, boolean overwrite ) {
     // get the metastore
-    ExportManifestMetaStore manifestMetaStore = manifest.getMetaStore();
-    if ( manifestMetaStore != null ) {
-      // get the zipped metastore from the export bundle
-      RepositoryFileImportBundle.Builder bundleBuilder =
-        new RepositoryFileImportBundle.Builder()
-          .path( manifestMetaStore.getFile() )
-          .name( manifestMetaStore.getName() )
-          .withParam( "description", manifestMetaStore.getDescription() )
-          .charSet( "UTF-8" )
-          .overwriteFile( overwrite )
-          .mime( "application/vnd.pentaho.metastore" );
+    if ( manifest != null ) {
+      ExportManifestMetaStore manifestMetaStore = manifest.getMetaStore();
+      if ( manifestMetaStore != null ) {
+        // get the zipped metastore from the export bundle
+        RepositoryFileImportBundle.Builder bundleBuilder =
+          new RepositoryFileImportBundle.Builder()
+            .path( manifestMetaStore.getFile() )
+            .name( manifestMetaStore.getName() )
+            .withParam( "description", manifestMetaStore.getDescription() )
+            .charSet( "UTF-8" )
+            .overwriteFile( overwrite )
+            .mime( "application/vnd.pentaho.metastore" );
 
-      cachedImports.put( manifestMetaStore.getFile(), bundleBuilder );
+        cachedImports.put( manifestMetaStore.getFile(), bundleBuilder );
+      }
     }
-
   }
 
   /**
@@ -335,6 +383,7 @@ public class SolutionImportHandler implements IPlatformImportHandler {
     Map<String, List<String>> roleToUserMap = new HashMap<>();
     IUserRoleDao roleDao = PentahoSystem.get( IUserRoleDao.class );
     ITenant tenant = new Tenant( "/pentaho/" + TenantUtils.getDefaultTenant(), true );
+
     if ( users != null && roleDao != null ) {
       for ( UserExport user : users ) {
         String password = user.getPassword();
@@ -360,11 +409,13 @@ public class SolutionImportHandler implements IPlatformImportHandler {
           log.info( Messages.getInstance().getString( "USER.Already.Exists", user.getUsername() ) );
 
           try {
-            // set the roles, maybe they changed
-            roleDao.setUserRoles( tenant, user.getUsername(), userRoles );
+            if ( isOverwriteFile() ) {
+              // set the roles, maybe they changed
+              roleDao.setUserRoles( tenant, user.getUsername(), userRoles );
 
-            // set the password just in case it changed
-            roleDao.setPassword( tenant, user.getUsername(), password );
+              // set the password just in case it changed
+              roleDao.setPassword( tenant, user.getUsername(), password );
+            }
           } catch ( Exception ex ) {
             // couldn't set the roles or password either
             log.debug( "Failed to set roles or password for existing user on import", ex );
@@ -372,9 +423,58 @@ public class SolutionImportHandler implements IPlatformImportHandler {
         } catch ( Exception e ) {
           log.error( Messages.getInstance().getString( "ERROR.CreatingUser", user.getUsername() ) );
         }
+        importUserSettings( user );
       }
     }
     return roleToUserMap;
+  }
+
+  protected void importGlobalUserSettings( List<ExportManifestUserSetting> globalSettings ) {
+    IUserSettingService settingService = PentahoSystem.get( IUserSettingService.class );
+    if ( settingService != null ) {
+      for ( ExportManifestUserSetting globalSetting : globalSettings ) {
+        if ( isOverwriteFile() ) {
+          settingService.setGlobalUserSetting( globalSetting.getName(), globalSetting.getValue() );
+        } else {
+          IUserSetting userSetting = settingService.getGlobalUserSetting( globalSetting.getName(), null );
+          if ( userSetting == null ) {
+            settingService.setGlobalUserSetting( globalSetting.getName(), globalSetting.getValue() );
+          }
+        }
+      }
+    }
+  }
+
+  protected void importUserSettings( UserExport user ) {
+    IUserSettingService settingService = PentahoSystem.get( IUserSettingService.class );
+    IAnyUserSettingService userSettingService = null;
+    if ( settingService != null && settingService instanceof IAnyUserSettingService ) {
+      userSettingService = (IAnyUserSettingService) settingService;
+    }
+
+    if ( userSettingService != null ) {
+      List<ExportManifestUserSetting> exportedSettings = user.getUserSettings();
+      try {
+        for ( ExportManifestUserSetting exportedSetting : exportedSettings ) {
+          if ( isOverwriteFile() ) {
+            userSettingService.setUserSetting( user.getUsername(),
+              exportedSetting.getName(), exportedSetting.getValue() );
+          } else {
+            // see if it's there first before we set this setting
+            IUserSetting userSetting =
+              userSettingService.getUserSetting( user.getUsername(), exportedSetting.getName(), null );
+            if ( userSetting == null ) {
+              // only set it if we didn't find that it exists already
+              userSettingService.setUserSetting( user.getUsername(),
+                exportedSetting.getName(), exportedSetting.getValue() );
+            }
+          }
+        }
+      } catch ( SecurityException e ) {
+        log.error( Messages.getInstance().getString( "ERROR.ImportingUserSetting", user.getUsername() ) );
+        log.debug( Messages.getInstance().getString( "ERROR.ImportingUserSetting", user.getUsername() ), e );
+      }
+    }
   }
 
   protected void importRoles( List<RoleExport> roles, Map<String, List<String>> roleToUserMap ) {
@@ -383,6 +483,7 @@ public class SolutionImportHandler implements IPlatformImportHandler {
     IRoleAuthorizationPolicyRoleBindingDao roleBindingDao = PentahoSystem.get(
       IRoleAuthorizationPolicyRoleBindingDao.class );
 
+    Set<String> existingRoles = new HashSet<>();
     if ( roles != null ) {
       for ( RoleExport role : roles ) {
         log.debug( "Importing role: " + role.getRolename() );
@@ -391,11 +492,20 @@ public class SolutionImportHandler implements IPlatformImportHandler {
           String[] userarray = users == null ? new String[] {} : users.toArray( new String[] {} );
           IPentahoRole role1 = roleDao.createRole( tenant, role.getRolename(), null, userarray );
         } catch ( AlreadyExistsException e ) {
+          existingRoles.add( role.getRolename() );
           // it's ok if the role already exists, it is probably a default role
           log.info( Messages.getInstance().getString( "ROLE.Already.Exists", role.getRolename() ) );
         }
         try {
-          roleBindingDao.setRoleBindings( tenant, role.getRolename(), role.getPermissions() );
+          if ( existingRoles.contains( role.getRolename() ) ) {
+            //Only update an existing role if the overwrite flag is set
+            if ( isOverwriteFile() ) {
+              roleBindingDao.setRoleBindings( tenant, role.getRolename(), role.getPermissions() );
+            }
+          } else {
+            //Always write a roles permissions that were not previously existing
+            roleBindingDao.setRoleBindings( tenant, role.getRolename(), role.getPermissions() );
+          }
         } catch ( Exception e ) {
           log.info( Messages.getInstance().getString( "ERROR.SettingRolePermissions", role.getRolename() ), e );
         }
@@ -512,4 +622,11 @@ public class SolutionImportHandler implements IPlatformImportHandler {
     return scheduler != null ? scheduler.createJob( jobRequest ) : null;
   }
 
+  public boolean isOverwriteFile() {
+    return overwriteFile;
+  }
+
+  public void setOverwriteFile( boolean overwriteFile ) {
+    this.overwriteFile = overwriteFile;
+  }
 }

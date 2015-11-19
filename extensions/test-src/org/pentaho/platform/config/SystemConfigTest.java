@@ -1,142 +1,92 @@
-/*!
- * This program is free software; you can redistribute it and/or modify it under the
- * terms of the GNU Lesser General Public License, version 2.1 as published by the Free Software
- * Foundation.
- *
- * You should have received a copy of the GNU Lesser General Public License along with this
- * program; if not, you can obtain a copy at http://www.gnu.org/licenses/old-licenses/lgpl-2.1.html
- * or from the Free Software Foundation, Inc.,
- * 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
- *
- * This program is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY;
- * without even the implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
- * See the GNU Lesser General Public License for more details.
- *
- * Copyright (c) 2002-2013 Pentaho Corporation..  All rights reserved.
- */
-
 package org.pentaho.platform.config;
 
+import org.junit.Before;
 import org.junit.Test;
+import org.junit.runner.RunWith;
+import org.mockito.Mock;
+import org.mockito.runners.MockitoJUnitRunner;
 import org.pentaho.platform.api.engine.IConfiguration;
-import org.pentaho.platform.engine.core.system.PathBasedSystemSettings;
-import org.pentaho.platform.engine.core.system.PentahoSystem;
-import org.pentaho.platform.engine.core.system.StandaloneApplicationContext;
-import org.springframework.context.support.FileSystemXmlApplicationContext;
 
-import java.io.File;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Properties;
 
-import static junit.framework.Assert.assertEquals;
-import static junit.framework.Assert.assertNotNull;
+import static org.junit.Assert.*;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.when;
 
 /**
- * User: nbaker Date: 4/2/13
+ * Created by rfellows on 10/22/15.
  */
+@RunWith( MockitoJUnitRunner.class )
 public class SystemConfigTest {
 
-  SystemConfig systemConfig = new SystemConfig();
+  SystemConfig systemConfig;
+  private List<IConfiguration> configs;
+  private Properties props1;
+  private Properties props2;
 
-  @Test
-  public void testSetConfiguration() throws Exception {
+  @Mock IConfiguration config1;
+  @Mock IConfiguration config2;
+  @Mock IConfiguration config3;
 
-    IConfiguration c =
-        new PropertiesFileConfiguration( "test", new File( "test-res/SystemConfig/system/test.properties" ) );
-    systemConfig.registerConfiguration( c );
-    assertNotNull( systemConfig.getConfiguration( "test" ) );
+  @Before
+  public void setUp() throws Exception {
+    configs = new ArrayList<>();
+
+    props1 = new Properties();
+    props1.put( "one", "un" );
+
+    props2 = new Properties();
+    props2.put( "two", "deux" );
+
+    when( config1.getId() ).thenReturn( "1" );
+    when( config1.getProperties() ).thenReturn( props1 );
+    when( config2.getId() ).thenReturn( "2" );
+    when( config2.getProperties() ).thenReturn( props2 );
+
+    configs.add( config1 );
+    configs.add( config2 );
   }
 
   @Test
-  public void testGetConfiguration() throws Exception {
+  public void testConstructor() throws Exception {
+    systemConfig = new SystemConfig( configs );
+    assertNotNull( systemConfig.getConfiguration( "1" ) );
+    assertNotNull( systemConfig.getConfiguration( "2" ) );
+  }
 
-    IConfiguration c =
-        new PropertiesFileConfiguration( "test", new File( "test-res/SystemConfig/system/test.properties" ) );
-    systemConfig.registerConfiguration( c );
+  @Test
+  public void testGetProperty() throws Exception {
+    systemConfig = new SystemConfig( configs );
+    String property = systemConfig.getProperty( "1.one" );
+    assertEquals( "un", property );
+  }
 
-    assertNotNull( systemConfig.getConfiguration( "test" ) );
-    assertEquals( "A dog's tale", systemConfig.getProperty( "test.someProperty" ) );
+  @Test
+  public void testGetProperty_unknown() throws Exception {
+    systemConfig = new SystemConfig( configs );
+    String property = systemConfig.getProperty( "1000.X" );
+    assertNull( property );
+  }
 
-    assertEquals( "A dog's tale", systemConfig.getConfiguration( "test" ).getProperties().get( "someProperty" ) );
+  @Test
+  public void testRegisterConfiguration() throws Exception {
+    systemConfig = new SystemConfig();
+    systemConfig.registerConfiguration( config1 );
+    assertEquals( 1, systemConfig.listConfigurations().length );
+
+    // do it again, make sure it didn't add another, but it undated the existing one
+    when( config3.getId() ).thenReturn( "1" );
+    when( config3.getProperties() ).thenReturn( props2 );
+
+    systemConfig.registerConfiguration( config3 );
+    assertEquals( 1, systemConfig.listConfigurations().length );
+    verify( config1 ).update( props2 );
   }
 
   @Test
   public void testListConfigurations() throws Exception {
 
-    IConfiguration c =
-        new PropertiesFileConfiguration( "test", new File( "test-res/SystemConfig/system/test.properties" ) );
-    systemConfig.registerConfiguration( c );
-    assertEquals( 1, systemConfig.listConfigurations().length );
-
-    c = new PropertiesFileConfiguration( "test", new File( "test-res/SystemConfig/system/test.properties" ) );
-    systemConfig.registerConfiguration( c );
-    assertEquals( 1, systemConfig.listConfigurations().length );
-
-    c = new PropertiesFileConfiguration( "test2", new File( "test-res/SystemConfig/system/test.properties" ) );
-    systemConfig.registerConfiguration( c );
-    assertEquals( 2, systemConfig.listConfigurations().length );
   }
-
-  @Test
-  public void testSpring() throws Exception {
-    PentahoSystem.clearObjectFactory();
-    FileSystemXmlApplicationContext context =
-        new FileSystemXmlApplicationContext( "test-res/SystemConfig/system/testPropertyPlaceholders.spring.xml" );
-    context.refresh();
-
-    assertNotNull( context.getBean( "testPlaceHolder" ) );
-    assertEquals( "A dog's tale", context.getBean( "testPlaceHolder" ) );
-  }
-
-  @Test
-  public void testWrite() throws Exception {
-    PentahoSystem.clearObjectFactory();
-
-    IConfiguration c =
-        new PropertiesFileConfiguration( "test", new File( "test-res/SystemConfig/system/test.properties" ) );
-    systemConfig.registerConfiguration( c );
-    IConfiguration configuration = systemConfig.getConfiguration( "test" );
-    Properties props = configuration.getProperties();
-    props.setProperty( "someProperty", "new value" );
-    configuration.update( props );
-
-    FileSystemXmlApplicationContext context =
-        new FileSystemXmlApplicationContext( "test-res/SystemConfig/system/testPropertyPlaceholders.spring.xml" );
-    context.refresh();
-
-    assertNotNull( context.getBean( "testPlaceHolder" ) );
-    assertEquals( "new value", context.getBean( "testPlaceHolder" ) );
-    props = configuration.getProperties();
-    props.setProperty( "someProperty", "A dog's tale" );
-    configuration.update( props );
-
-  }
-
-  @Test
-  public void testSystemSettingsConfiguration() throws Exception {
-
-    PentahoSystem.clearObjectFactory();
-    PentahoSystem.setApplicationContext( new StandaloneApplicationContext( "test-res/SystemConfig", "" ) );
-    SystemSettingsConfiguration settings = new SystemSettingsConfiguration( "system", new PathBasedSystemSettings() );
-    Properties props = settings.getProperties();
-    assertNotNull( props );
-    assertEquals( "Hypersonic", props.get( "sampledata-datasource.type" ) );
-  }
-
-  @Test
-  public void testSystemSettingsFromSpring() throws Exception {
-    PentahoSystem.clearObjectFactory();
-    PentahoSystem.setApplicationContext( new StandaloneApplicationContext( "test-res/SystemConfig", "" ) );
-
-    FileSystemXmlApplicationContext context =
-        new FileSystemXmlApplicationContext(
-            "test-res/SystemConfig/system/testPropertyPlaceholders-system-settings.spring.xml" );
-    context.refresh();
-
-    assertNotNull( context.getBean( "testPlaceHolder" ) );
-    assertEquals( "Hypersonic", context.getBean( "testPlaceHolder" ) );
-
-    assertNotNull( context.getBean( "testPlaceHolder2" ) );
-    assertEquals( "A dog's tale", context.getBean( "testPlaceHolder2" ) );
-  }
-
 }

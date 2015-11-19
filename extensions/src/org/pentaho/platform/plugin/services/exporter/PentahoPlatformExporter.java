@@ -19,6 +19,9 @@ import org.pentaho.platform.api.repository2.unified.RepositoryFile;
 import org.pentaho.platform.api.scheduler2.IScheduler;
 import org.pentaho.platform.api.scheduler2.Job;
 import org.pentaho.platform.api.scheduler2.SchedulerException;
+import org.pentaho.platform.api.usersettings.IAnyUserSettingService;
+import org.pentaho.platform.api.usersettings.IUserSettingService;
+import org.pentaho.platform.api.usersettings.pojo.IUserSetting;
 import org.pentaho.platform.engine.core.system.PentahoSystem;
 import org.pentaho.platform.engine.core.system.TenantUtils;
 import org.pentaho.platform.plugin.action.mondrian.catalog.IMondrianCatalogService;
@@ -26,6 +29,7 @@ import org.pentaho.platform.plugin.action.mondrian.catalog.MondrianCatalog;
 import org.pentaho.platform.plugin.services.importexport.DefaultExportHandler;
 import org.pentaho.platform.plugin.services.importexport.ExportException;
 import org.pentaho.platform.plugin.services.importexport.ExportFileNameEncoder;
+import org.pentaho.platform.plugin.services.importexport.ExportManifestUserSetting;
 import org.pentaho.platform.plugin.services.importexport.RoleExport;
 import org.pentaho.platform.plugin.services.importexport.UserExport;
 import org.pentaho.platform.plugin.services.importexport.ZipExportProcessor;
@@ -79,6 +83,7 @@ public class PentahoPlatformExporter extends ZipExportProcessor {
   private IMondrianCatalogService mondrianCatalogService;
   private MondrianCatalogRepositoryHelper mondrianCatalogRepositoryHelper;
   private IMetaStore metastore;
+  private IUserSettingService userSettingService;
 
   public PentahoPlatformExporter( IUnifiedRepository repository ) {
     super( ROOT, repository, true );
@@ -167,11 +172,15 @@ public class PentahoPlatformExporter extends ZipExportProcessor {
 
       for ( String fileName : domainFilesData.keySet() ) {
         // write the file to the zip
-        String path = METADATA_PATH_IN_ZIP + fileName;
-        if ( !path.endsWith( ".xmi" ) ) {
-          path += ".xmi";
+        String metadataFilePath = METADATA_PATH_IN_ZIP + fileName;
+        if ( !metadataFilePath.endsWith( ".xmi" ) ) {
+          metadataFilePath += ".xmi";
         }
-        ZipEntry zipEntry = new ZipEntry( new ZipEntry( ExportFileNameEncoder.encodeZipPathName( path ) ) );
+        String metadataZipEntryName = metadataFilePath;
+        if ( this.withManifest ) {
+          metadataZipEntryName = ExportFileNameEncoder.encodeZipPathName( metadataZipEntryName );
+        }
+        ZipEntry zipEntry = new ZipEntry( metadataZipEntryName );
         InputStream inputStream = domainFilesData.get( fileName );
 
         try {
@@ -181,7 +190,7 @@ public class PentahoPlatformExporter extends ZipExportProcessor {
           // add the info to the exportManifest
           ExportManifestMetadata metadata = new ExportManifestMetadata();
           metadata.setDomainId( domainId );
-          metadata.setFile( path );
+          metadata.setFile( metadataFilePath );
           getExportManifest().addMetadata( metadata );
 
         } catch ( IOException e ) {
@@ -301,6 +310,9 @@ public class PentahoPlatformExporter extends ZipExportProcessor {
       IRoleAuthorizationPolicyRoleBindingDao.class );
     ITenant tenant = TenantUtils.getCurrentTenant();
 
+    //  get the user settings for this user
+    IUserSettingService service = getUserSettingService();
+
     //User Export
     List<IPentahoUser> userList = roleDao.getUsers( tenant );
     for ( IPentahoUser user : userList ) {
@@ -312,7 +324,27 @@ public class PentahoPlatformExporter extends ZipExportProcessor {
         userExport.setRole( role.getName() );
       }
 
+      if ( service != null && service instanceof IAnyUserSettingService ) {
+        IAnyUserSettingService userSettings = (IAnyUserSettingService) service;
+        List<IUserSetting> settings = userSettings.getUserSettings( user.getUsername() );
+        if ( settings != null ) {
+          for ( IUserSetting setting : settings ) {
+            userExport.addUserSetting( new ExportManifestUserSetting( setting ) );
+          }
+        }
+      }
+
       this.getExportManifest().addUserExport( userExport );
+    }
+
+    // export the global user settings
+    if ( service != null ) {
+      List<IUserSetting> globalUserSettings = service.getGlobalUserSettings();
+      if ( globalUserSettings != null ) {
+        for ( IUserSetting setting : globalUserSettings ) {
+          getExportManifest().addGlobalUserSetting( new ExportManifestUserSetting( setting ) );
+        }
+      }
     }
 
     //RoleExport
@@ -433,8 +465,7 @@ public class PentahoPlatformExporter extends ZipExportProcessor {
 
       // don't zip root folder without name
       if ( !ClientRepositoryPaths.getRootFolderPath().equals( exportRepositoryFile.getPath() ) ) {
-        zos.putNextEntry( new ZipEntry( ExportFileNameEncoder
-          .encodeZipPathName( getZipEntryName( exportRepositoryFile, filePath ) ) ) );
+        zos.putNextEntry( new ZipEntry( getFixedZipEntryName( exportRepositoryFile, filePath ) ) );
       }
       exportDirectory( exportRepositoryFile, zos, filePath );
 
@@ -504,4 +535,41 @@ public class PentahoPlatformExporter extends ZipExportProcessor {
     IMondrianCatalogService mondrianCatalogService ) {
     this.mondrianCatalogService = mondrianCatalogService;
   }
+
+  public IUserSettingService getUserSettingService() {
+    if ( userSettingService == null ) {
+      userSettingService = PentahoSystem.get( IUserSettingService.class, getSession() );
+    }
+    return userSettingService;
+  }
+
+  public void setUserSettingService( IUserSettingService userSettingService ) {
+    this.userSettingService = userSettingService;
+  }
+
+  @Override
+  protected boolean isExportCandidate( String path ) {
+    if ( path == null ) {
+      return false;
+    }
+
+    String etc = ClientRepositoryPaths.getEtcFolderPath();
+
+    // we need to include the etc/operation_mart folder and sub folders
+    // but NOT any other folders in /etc
+
+    if ( path.startsWith( etc ) ) {
+      // might need to export it...
+      String etc_operations_mart = etc + RepositoryFile.SEPARATOR + "operations_mart";
+      if ( path.equals( etc ) ) {
+        return true;
+      } else if ( path.startsWith( etc_operations_mart ) ) {
+        return true;
+      } else {
+        return false;
+      }
+    }
+    return true;
+  }
+
 }
